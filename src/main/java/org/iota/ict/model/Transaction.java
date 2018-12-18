@@ -9,6 +9,9 @@ import java.math.BigInteger;
 import java.net.DatagramPacket;
 
 public class Transaction implements Serializable {
+
+    public static final Transaction NULL_TRANSACTION = new Transaction();
+
     public final String signatureFragments;
     public final String extraDataDigest;
     public final String address;
@@ -26,8 +29,47 @@ public class Transaction implements Serializable {
     public String requestHash;
     public final String hash;
 
+    public final boolean isBundleHead, isBundleTail;
+
     Transaction branch;
     Transaction trunk;
+
+    /**
+     * Creates the NULL transaction. All trits are 0. Requires separate constructor because
+     * all trit flags are set to 0 thus making this transaction actually invalid.
+     */
+    private Transaction() {
+        signatureFragments = generateNullTrytes(Field.SIGNATURE_FRAGMENTS);
+        extraDataDigest = generateNullTrytes(Field.EXTRA_DATA_DIGEST);
+        address = generateNullTrytes(Field.ADDRESS);
+        value = BigInteger.ZERO;
+        issuanceTimestamp = 0;
+        timelockLowerBound = 0;
+        timelockUpperBound = 0;
+        bundleNonce = generateNullTrytes(Field.BUNDLE_NONCE);
+        trunkHash = generateNullTrytes(Field.TRUNK_HASH);
+        branchHash = generateNullTrytes(Field.BRANCH_HASH);
+        tag = generateNullTrytes(Field.TAG);
+        attachmentTimestamp = 0;
+        attachmentTimestampLowerBound = 0;
+        attachmentTimestampUpperBound = 0;
+        nonce = generateNullTrytes(Field.NONCE);
+        decodedSignatureFragments = "";
+
+        trytes = trytes();
+        hash = curlHash();
+        isBundleHead = true;
+        isBundleTail = true;
+
+        branch = this;
+        trunk = this;
+
+        assert trytes().matches("^[9]{" + Constants.TRANSACTION_SIZE_TRYTES + "}$");
+    }
+
+    private static String generateNullTrytes(Transaction.Field field) {
+        return Trytes.padRight("", field.tryteLength);
+    }
 
     Transaction(TransactionBuilder builder) {
         signatureFragments = builder.signatureFragments;
@@ -53,6 +95,25 @@ public class Transaction implements Serializable {
 
         hash = curlHash();
         decodedSignatureFragments = Trytes.toAscii(signatureFragments);
+
+        byte[] hashTrits = Trytes.toTrits(hash);
+        isBundleHead = isFlagSet(hashTrits, Constants.HashFlags.BUNDLE_HEAD_FLAG);
+        isBundleTail = isFlagSet(hashTrits, Constants.HashFlags.BUNDLE_TAIL_FLAG);
+    }
+
+    /**
+     * Determines the value of a flag in the hash trits.
+     *
+     * @param hashTrits The trit sequence of the transaction hash (length must be 243).
+     * @param position  Position of the trit which defines this flag.
+     * @return {@code true} if flag trit is 1, {@code false} if flag trit is -1
+     * @throws InvalidTransactionFlagException if flag trit is 0.
+     */
+    private static boolean isFlagSet(byte[] hashTrits, int position) {
+        assert hashTrits.length == Field.REQUEST_HASH.tritLength;
+        if (hashTrits[position] == 0)
+            throw new InvalidTransactionFlagException(position);
+        return hashTrits[position] == 1;
     }
 
     /**
@@ -83,6 +144,10 @@ public class Transaction implements Serializable {
         assert trytes.startsWith(this.trytes.substring(0, Field.REQUEST_HASH.tryteOffset));
         hash = curlHash();
         decodedSignatureFragments = Trytes.toAscii(signatureFragments);
+
+        byte[] hashTrits = Trytes.toTrits(hash);
+        isBundleHead = isFlagSet(hashTrits, Constants.HashFlags.BUNDLE_HEAD_FLAG);
+        isBundleTail = isFlagSet(hashTrits, Constants.HashFlags.BUNDLE_TAIL_FLAG);
     }
 
     /**
@@ -115,7 +180,7 @@ public class Transaction implements Serializable {
      * @return Calculated hash of this transaction.
      */
     private String curlHash() {
-        return IotaCurlHash.iotaCurlHash(trytes, trytes.length(), 123);
+        return IotaCurlHash.iotaCurlHash(trytes, trytes.length(), Constants.CURL_ROUNDS_TRANSACTION_HASH);
     }
 
     private static void putField(char[] target, Field field, long value) {
@@ -141,7 +206,8 @@ public class Transaction implements Serializable {
 
     public DatagramPacket toDatagramPacket() {
         String fullTrytes = trytes.substring(0, Field.REQUEST_HASH.tryteOffset) + requestHash;
-        return new DatagramPacket(fullTrytes.getBytes(), fullTrytes.getBytes().length);
+        byte[] bytes = Trytes.toBytes(fullTrytes);
+        return new DatagramPacket(bytes, bytes.length);
     }
 
     public Transaction getBranch() {
@@ -180,6 +246,12 @@ public class Transaction implements Serializable {
             this.tritOffset = previousField == null ? 0 : previousField.tritOffset + previousField.tritLength;
             this.tryteOffset = tritOffset / 3;
             this.tryteLength = tritLength / 3;
+        }
+    }
+
+    static class InvalidTransactionFlagException extends RuntimeException {
+        InvalidTransactionFlagException(int flagIndex) {
+            super("Flag defined in trit #" + flagIndex + " of transaction hash is invalid.");
         }
     }
 }
